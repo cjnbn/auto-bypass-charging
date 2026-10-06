@@ -107,7 +107,7 @@ while [ "$i" -lt 120 ]; do
   esac
   if [ "$nc" -ge 2 ] && [ -z "$STOPPED" ]; then
     STOPPED=1
-    say "  ★★★ 停住了：连续两天采样 ibat>=$ib、usb_on=$uo、cap=$cap、cp=$(cat $P)、usb_in=$(cat $U/input_current_now)"
+    say "  ★★★ 停住了：连续两次采样 ibat>=$ib、usb_on=$uo、cap=$cap、cp=$(cat $P)、usb_in=$(cat $U/input_current_now)"
   fi
   case "$cap" in ''|*[!0-9]*) ;; *) [ "$cap" -ge 84 ] && { say "  已到 cap=$cap，结束观察"; break; } ;; esac
   sleep 30

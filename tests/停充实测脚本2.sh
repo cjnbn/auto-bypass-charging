@@ -17,10 +17,10 @@ rm -f "$DONE"
 say() { echo "$1" >> "$LOG"; echo "$1"; }
 
 w() {   # $1=节点 $2=值   —— 保留 stderr，方便看清「写入报错但生效」到底报的是什么
-  if printf '%s\n' "$2" > "$1" 2>/tmp/bz_werr; then
+  if printf '%s\n' "$2" > "$1" 2>/data/local/tmp/bz_werr; then
     say "     > 写 [$2] -> $1   rc=0  读回=[$(cat "$1" 2>/dev/null)]"
   else
-    say "     > 写 [$2] -> $1   rc!=0 读回=[$(cat "$1" 2>/dev/null)] 错误=[$(cat /tmp/bz_werr 2>/dev/null)]"
+    say "     > 写 [$2] -> $1   rc!=0 读回=[$(cat "$1" 2>/dev/null)] 错误=[$(cat /data/local/tmp/bz_werr 2>/dev/null)]"
   fi
 }
 
@@ -81,16 +81,16 @@ w $M/current_cmd "0 0"
 sleep 8
 need_charging "诊断前"
 say "  试 printf '1\\n'："
-{ printf '%s\n' 1 > $B/input_suspend ; } 2>/tmp/e1
-say "     rc=$?  stderr=[$(cat /tmp/e1 2>/dev/null)]  读回=[$(cat $B/input_suspend)]"
+{ printf '%s\n' 1 > $B/input_suspend ; } 2>/data/local/tmp/e1
+say "     rc=$?  stderr=[$(cat /data/local/tmp/e1 2>/dev/null)]  读回=[$(cat $B/input_suspend)]"
 sleep 5
 sam "诊断中"
 say "  试 echo 1："
-{ echo 1 > $B/input_suspend ; } 2>/tmp/e2
-say "     rc=$?  stderr=[$(cat /tmp/e2 2>/dev/null)]  读回=[$(cat $B/input_suspend)]"
+{ echo 1 > $B/input_suspend ; } 2>/data/local/tmp/e2
+say "     rc=$?  stderr=[$(cat /data/local/tmp/e2 2>/dev/null)]  读回=[$(cat $B/input_suspend)]"
 say "  试 printf '0\\n' 还原："
-{ printf '%s\n' 0 > $B/input_suspend ; } 2>/tmp/e3
-say "     rc=$?  stderr=[$(cat /tmp/e3 2>/dev/null)]  读回=[$(cat $B/input_suspend)]"
+{ printf '%s\n' 0 > $B/input_suspend ; } 2>/data/local/tmp/e3
+say "     rc=$?  stderr=[$(cat /data/local/tmp/e3 2>/dev/null)]  读回=[$(cat $B/input_suspend)]"
 sleep 8
 need_charging "诊断后"
 say ""

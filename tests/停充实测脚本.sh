@@ -52,7 +52,7 @@ restore_all() {
   printf '%s\n' 0 > $U/input_suspend   2>/dev/null
   printf '%s\n' 0 > $B/night_charging  2>/dev/null
   printf '%s\n' -1 > $C/input_current  2>/dev/null
-  printf '%s\n' 0 > $M/en_power_path   2>/dev/null
+  printf '%s\n' 1 > $M/en_power_path   2>/dev/null
   printf '%s\n' "0 1" > $M/current_cmd 2>/dev/null
   say "  读回: batt_suspend=$(cat $B/input_suspend) usb_suspend=$(cat $U/input_suspend) night=$(cat $B/night_charging) input_current=$(cat $C/input_current) en_power_path=$(cat $M/en_power_path) current_cmd=[$(cat $M/current_cmd)]"
   say "  重启守护进程..."
