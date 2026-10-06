@@ -73,7 +73,7 @@
 CTL=/data/adb/modules/bypass_charger/bypassctl.sh
 
 su -c "sh $CTL status"        # 结构化状态（KEY=VALUE，WebUI 读的就是它）
-su -c "sh $CTL text"          # 人类可读
+su -c "sh $CTL text"          # 给人看的
 su -c "sh $CTL on"            # 一次性：立即进入旁路（不改模式）
 su -c "sh $CTL off"           # 一次性：立即恢复充电
 su -c "sh $CTL mode on"       # 切模式：手动旁路（无视阈值）
