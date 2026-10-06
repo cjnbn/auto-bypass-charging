@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="stylesheet" href="/internal/insets.css">
+<title>自动旁路供电</title>
+<style>
+  :root{
+    --bg:#111214; --card:#1c1e22; --card2:#24272c; --fg:#e8eaed; --dim:#9aa0a6;
+    --line:#33373d; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; --accent:#60a5fa;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  body{margin:0; padding:16px; background:var(--bg); color:var(--fg);
+       font:15px/1.5 -apple-system,"Noto Sans SC",system-ui,sans-serif; padding-bottom:48px}
+  h1{font-size:19px; margin:4px 0 14px; display:flex; align-items:baseline; gap:8px}
+  h1 small{font-size:12px; color:var(--dim); font-weight:400}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px}
+  .card h2{font-size:13px; color:var(--dim); margin:0 0 10px; font-weight:600; letter-spacing:.4px}
+  .badge{display:inline-flex; align-items:center; gap:7px; font-size:16px; font-weight:600;
+         padding:7px 14px; border-radius:999px; background:var(--card2); margin-bottom:12px}
+  .dot{width:9px; height:9px; border-radius:50%; background:var(--dim)}
+  .on .dot{background:var(--ok); box-shadow:0 0 8px var(--ok)}
+  .on{color:var(--ok)}
+  .off .dot{background:var(--accent)}
+  .err .dot{background:var(--bad)}
+  .err{color:var(--bad)}
+  .warn .dot{background:var(--warn)}
+  .warn{color:var(--warn)}
+  .row{display:flex; justify-content:space-between; align-items:baseline; gap:12px;
+       padding:8px 0; border-top:1px solid var(--line)}
+  .row:first-of-type{border-top:0}
+  .row .k{color:var(--dim); flex:0 0 auto}
+  .row .v{text-align:right; font-variant-numeric:tabular-nums}
+  label.f{display:block; margin-bottom:12px}
+  label.f .lab{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px}
+  label.f .lab b{font-weight:500}
+  label.f .lab span{font-size:12px; color:var(--dim)}
+  input[type=number]{width:100%; padding:11px 12px; font-size:16px; border-radius:10px;
+    border:1px solid var(--line); background:var(--card2); color:var(--fg)}
+  input[type=number]:focus{outline:none; border-color:var(--accent)}
+  .switch{display:flex; align-items:center; justify-content:space-between; padding:8px 0}
+  .switch input{width:22px; height:22px}
+  .btns{display:grid; grid-template-columns:1fr 1fr; gap:9px}
+  button{padding:12px; font-size:15px; border-radius:11px; border:1px solid var(--line);
+    background:var(--card2); color:var(--fg); font-weight:500}
+  button:active{transform:scale(.98)}
+  button.primary{background:var(--accent); border-color:var(--accent); color:#0b1220; grid-column:1/-1}
+  button.active{background:var(--accent); border-color:var(--accent); color:#0b1220; font-weight:600}
+  .modeRow{display:flex; align-items:center; gap:8px; padding:8px 0; border-top:1px solid var(--line)}
+  .modeRow .k{color:var(--dim)}
+  .modePill{font-size:13px; font-weight:600; padding:3px 10px; border-radius:999px;
+    background:var(--card2); border:1px solid var(--line)}
+  .modePill.auto{color:var(--accent); border-color:var(--accent)}
+  .modePill.on{color:var(--ok); border-color:var(--ok)}
+  pre{background:#0d0e10; border:1px solid var(--line); border-radius:10px; padding:11px;
+      overflow:auto; max-height:290px; font-size:11.5px; line-height:1.55; margin:0;
+      font-family:ui-monospace,Menlo,monospace; color:#c9d1d9; white-space:pre-wrap; word-break:break-all}
+  .hint{font-size:12px; color:var(--dim); margin-top:8px}
+  .toast{position:fixed; left:50%; transform:translateX(-50%); bottom:26px; background:#2b2f36;
+    color:#fff; padding:11px 18px; border-radius:11px; font-size:14px; opacity:0;
+    transition:opacity .2s; pointer-events:none; max-width:90vw; text-align:center; z-index:9}
+  .toast.show{opacity:1}
+</style>
+</head>
+<body>
+
+<h1>自动旁路供电 <small id="ver"></small></h1>
+
+<div class="card">
+  <h2>状态</h2>
+  <div id="badge" class="badge"><span class="dot"></span><span id="badgeText">读取中…</span></div>
+  <div class="row"><span class="k">电池</span><span class="v" id="s-ibat">–</span></div>
+  <div class="row"><span class="k">适配器</span><span class="v" id="s-usb">–</span></div>
+  <div class="row"><span class="k">守护进程</span><span class="v" id="s-daemon">–</span></div>
+  <div class="modeRow"><span class="k">模式</span><span id="s-mode" class="modePill">–</span>
+    <span class="k" id="s-modedesc" style="font-size:12px"></span></div>
+  <div class="switch"><span>自动刷新（3 秒）</span><input type="checkbox" id="auto" checked></div>
+</div>
+
+<div class="card">
+  <h2>手动操作</h2>
+  <div class="btns">
+    <button id="btn-auto">自动</button>
+    <button id="btn-on">开启旁路</button>
+  </div>
+  <div class="hint">「自动」按配置的阈值进/出旁路；「开启旁路」无视阈值，插着充电器就一直保持旁路
+    （拔掉充电器或切回「自动」才会退出）。</div>
+</div>
+
+<div class="card">
+  <h2>配置</h2>
+  <label class="f"><span class="lab"><b>进入旁路电量</b><span>充到此电量后停止充放</span></span>
+    <input type="number" id="c-en" min="1" max="100" step="1"></label>
+  <label class="f"><span class="lab"><b>恢复充电电量</b><span>低于此电量恢复充电</span></span>
+    <input type="number" id="c-dis" min="1" max="100" step="1"></label>
+  <label class="f"><span class="lab"><b>检测间隔（秒）</b><span>越小响应越快、越费电</span></span>
+    <input type="number" id="c-iv" min="5" max="3600" step="5"></label>
+  <div class="switch"><span>DEBUG 详细日志</span><input type="checkbox" id="c-dbg"></div>
+  <div class="btns" style="margin-top:12px">
+    <button class="primary" id="btn-save">保存并重启守护进程</button>
+  </div>
+  <div class="hint">配置写入 <span id="confPath">/data/adb/bypass_charger/config.sh</span>，模块目录之外，更新模块不会丢。</div>
+</div>
+
+<div class="card">
+  <h2>日志</h2>
+  <pre id="log">加载中…</pre>
+  <div class="btns" style="margin-top:10px">
+    <button class="primary" id="btn-log">刷新日志</button>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+(function () {
+  var MODDIR = '/data/adb/modules/bypass_charger';
+  var STATE_DIR = '/data/adb/bypass_charger';
+  var $ = function (s) { return document.querySelector(s); };
+  var timer = null;
+
+  function hasKsu() { return typeof ksu !== 'undefined' && ksu && typeof ksu.exec === 'function'; }
+
+  function exec(cmd) {
+    return new Promise(function (resolve, reject) {
+      if (!hasKsu()) { reject(new Error('不在 KernelSU 管理器里打开，无法执行命令')); return; }
+      var cb = 'ksucb_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+      var done = false;
+      window[cb] = function (errno, stdout, stderr) {
+        done = true; try { delete window[cb]; } catch (e) {}
+        resolve({ errno: errno, stdout: stdout || '', stderr: stderr || '' });
+      };
+      try { ksu.exec(cmd, '{}', cb); }
+      catch (e) { try { delete window[cb]; } catch (e2) {} reject(e); return; }
+      setTimeout(function () {
+        if (!done) { try { delete window[cb]; } catch (e) {} reject(new Error('命令超时')); }
+      }, 20000);
+    });
+  }
+
+  var toastTimer = null;
+  function toast(msg) {
+    var t = $('#toast'); t.textContent = msg; t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.classList.remove('show'); }, 2200);
+  }
+
+  function set(id, text) { var e = $(id); if (e) e.textContent = text; }
+
+  try {
+    if (hasKsu() && typeof ksu.moduleInfo === 'function') {
+      var mi = String(ksu.moduleInfo() || '').trim();
+      if (mi.charAt(0) === '{') {
+        var o = JSON.parse(mi);
+        var id = o.id || o.moduleId || o.moduleID;
+        if (id) MODDIR = '/data/adb/modules/' + id;
+      } else if (/^[A-Za-z][A-Za-z0-9._-]*$/.test(mi)) {
+        MODDIR = '/data/adb/modules/' + mi;
+      }
+    }
+  } catch (e) {}
+
+  var CTL = 'sh ' + MODDIR + '/bypassctl.sh';
+
+  function parseKV(text) {
+    var out = {};
+    (text || '').split('\n').forEach(function (line) {
+      var i = line.indexOf('=');
+      if (i > 0) out[line.slice(0, i)] = line.slice(i + 1);
+    });
+    return out;
+  }
+
+  // 电池：内核 current_now 单位 uA、voltage_now 单位 uV。
+  // 内核原始值约定是「充电为负、放电为正」，这里取反按用户习惯显示 ——
+  // 放电显示为 -，充电显示为 +。W 取绝对值。
+  function fmtBattery(uA, uV) {
+    var raw = parseInt(uA, 10);
+    if (isNaN(raw)) return '–';
+    var v = parseInt(uV, 10);
+    if (isNaN(v) || v < 0) v = 0;
+    var ma = (-raw) / 1000;
+    var s = (ma > 0 ? '+' : '') + ma.toFixed(0) + ' mA';
+    s += '　' + Math.abs(ma / 1000 * (v / 1000000)).toFixed(2) + ' W';
+    return s;
+  }
+
+  // 适配器：usb/input_current_now 单位 mA、usb/voltage_now 单位 mV。
+  // 始终显示 W —— 拔掉充电器时电压为 0，功率算出来就是 0.00。
+  // 注意：PD 快充时电流走充电泵，这个电流节点会读成 0；
+  //       只有进了旁路（退回 5V 主充电路径）读数才是准的。
+  function fmtUsb(mA, mV) {
+    var i = parseInt(mA, 10);
+    if (isNaN(i)) return '–';
+    var v = parseInt(mV, 10);
+    if (isNaN(v) || v < 0) v = 0;
+    return i + ' mA　' + ((i / 1000) * (v / 1000)).toFixed(2) + ' W';
+  }
+
+  function render(s) {
+    set('#ver', s.MODULE_VERSION || '');
+    var badge = $('#badge'), text = $('#badgeText');
+    var bypassOn = (s.BYPASS === 'on');
+    // 运行模式（v12.1）：auto = 按阈值自动；on = 手动强制旁路（无视阈值）
+    var manual = (s.MODE === 'on');
+
+    badge.className = 'badge';
+    if (s.DAEMON !== '1') { badge.classList.add('err'); text.textContent = '守护进程未运行'; }
+    else if (s.USB_ONLINE === '0') { badge.classList.add('warn'); text.textContent = '未接充电器'; }
+    // 「旁路已下达」不等于「旁路真的生效」：PD 快充时电流走充电泵绕开主充电器，
+    // 状态节点写进去了、电池照样在充。这种时候必须如实说，不能让用户以为电池闲置了。
+    else if (bypassOn && s.BYPASS_EFFECTIVE === '0') { badge.classList.add('err'); text.textContent = '旁路无效'; }
+    else if (bypassOn) { badge.classList.add('on'); text.textContent = manual ? '旁路已开启（手动）' : '旁路已开启'; }
+    else { badge.classList.add('off'); text.textContent = '正常充电'; }
+
+    // 模式状态
+    var pill = $('#s-mode');
+    if (pill) {
+      pill.textContent = manual ? '手动旁路' : '自动';
+      pill.className = 'modePill ' + (manual ? 'on' : 'auto');
+    }
+    set('#s-modedesc', manual ? '无视阈值，插着就保持旁路' : '按配置阈值进 / 出旁路');
+    var bAuto = $('#btn-auto'), bOn = $('#btn-on');
+    if (bAuto) bAuto.classList.toggle('active', !manual);
+    if (bOn) bOn.classList.toggle('active', manual);
+
+    set('#s-ibat', fmtBattery(s.IBAT, s.BATT_VOLT));
+    set('#s-usb', fmtUsb(s.USB_IN, s.USB_VOLT));
+    set('#s-daemon', s.DAEMON === '1' ? '运行中' : '未运行');
+    if (s.STATE_DIR) { STATE_DIR = s.STATE_DIR; set('#confPath', STATE_DIR + '/config.sh'); }
+
+    var ae = document.activeElement;
+    if (!ae || ae.tagName !== 'INPUT') {
+      $('#c-en').value = s.ENABLE_THRESHOLD || '';
+      $('#c-dis').value = s.DISABLE_THRESHOLD || '';
+      $('#c-iv').value = s.CHECK_INTERVAL || '';
+      $('#c-dbg').checked = (s.DEBUG === '1');
+    }
+  }
+
+  async function refresh() {
+    try {
+      var r = await exec(CTL + ' status');
+      if (r.errno !== 0 && !r.stdout) { toast('读取状态失败: ' + (r.stderr || r.errno)); return; }
+      render(parseKV(r.stdout));
+    } catch (e) { toast(String(e.message || e)); }
+  }
+
+  async function loadLog() {
+    try {
+      var r = await exec(CTL + ' log 60');
+      $('#log').textContent = ((r.stdout || '') + (r.stderr ? '\n[stderr] ' + r.stderr : '')) || '(空)';
+      $('#log').scrollTop = $('#log').scrollHeight;
+    } catch (e) { $('#log').textContent = String(e.message || e); }
+  }
+
+  function b64(str) { return btoa(unescape(encodeURIComponent(str))); }
+
+  async function saveConfig() {
+    var en = parseInt($('#c-en').value, 10);
+    var dis = parseInt($('#c-dis').value, 10);
+    var iv = parseInt($('#c-iv').value, 10);
+    var dbg = $('#c-dbg').checked ? 1 : 0;
+
+    if (!(en >= 1 && en <= 100)) { toast('进入电量需在 1–100'); return; }
+    if (!(dis >= 1 && dis <= 100)) { toast('恢复电量需在 1–100'); return; }
+    if (en <= dis) { toast('进入电量必须大于恢复电量'); return; }
+    if (!(iv >= 5 && iv <= 3600)) { toast('检测间隔需在 5–3600 秒'); return; }
+
+    try {
+      var cur = await exec('cat ' + STATE_DIR + '/config.sh 2>/dev/null');
+      var want = {
+        ENABLE_THRESHOLD: en, DISABLE_THRESHOLD: dis,
+        CHECK_INTERVAL: iv, DEBUG: dbg
+      };
+      var lines = (cur.stdout || '').split('\n'), seen = {};
+      var out = lines.map(function (line) {
+        var i = line.indexOf('=');
+        if (i <= 0) return line;
+        var k = line.slice(0, i).trim();
+        if (want.hasOwnProperty(k)) { seen[k] = 1; return k + '=' + want[k]; }
+        return line;
+      });
+      Object.keys(want).forEach(function (k) { if (!seen[k]) out.push(k + '=' + want[k]); });
+      var content = out.join('\n').replace(/\n+$/, '') + '\n';
+
+      var r = await exec("echo '" + b64(content) + "' | base64 -d > " + STATE_DIR + '/config.sh && chmod 600 ' + STATE_DIR + '/config.sh');
+      if (r.errno !== 0) { toast('写入配置失败: ' + (r.stderr || r.errno)); return; }
+      toast('配置已保存，正在重启守护进程');
+      await doRestart(false);
+      await refresh();
+    } catch (e) { toast(String(e.message || e)); }
+  }
+
+  async function doRestart(showToast) {
+    try {
+      var r = await exec(CTL + ' restart');
+      var ok = /OK/.test(r.stdout || '');
+      if (showToast !== false) toast(ok ? '守护进程已重启' : ('重启失败: ' + (r.stdout || r.stderr)));
+      await refresh();
+    } catch (e) { toast(String(e.message || e)); }
+  }
+
+  // 切换运行模式：'auto' 或 'on'
+  async function manualMode(which) {
+    try {
+      var r = await exec(CTL + ' mode ' + which);
+      var msg = (r.stdout || '').trim().split('\n')[0] || (r.stderr || '').trim();
+      toast(msg || (which === 'on' ? '已切到手动旁路' : '已切回自动'));
+      // 守护进程收到 USR1 会立刻重判，稍等一下再刷新就能看到结果
+      setTimeout(refresh, 700);
+    } catch (e) { toast(String(e.message || e)); }
+  }
+
+  function bind() {
+    $('#btn-save').addEventListener('click', saveConfig);
+    $('#btn-log').addEventListener('click', loadLog);
+    $('#btn-auto').addEventListener('click', function () { manualMode('auto'); });
+    $('#btn-on').addEventListener('click', function () { manualMode('on'); });
+    $('#auto').addEventListener('change', function (e) {
+      if (timer) { clearInterval(timer); timer = null; }
+      if (e.target.checked) timer = setInterval(function () { refresh(); }, 3000);
+    });
+  }
+
+  function boot() {
+    bind();
+    if (!hasKsu()) {
+      set('#badgeText', '请在 KernelSU 管理器中打开');
+      $('#badge').className = 'badge err';
+      return;
+    }
+    refresh(); loadLog();
+    timer = setInterval(function () { refresh(); }, 3000);
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
+})();
+</script>
+</body>
+</html>

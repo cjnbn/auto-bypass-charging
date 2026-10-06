@@ -1,0 +1,20 @@
+# 模块运行期生成的文件（在 /data/adb/bypass_charger/ 里，不在本仓库；列在这里防止有人本地跑）
+config.sh
+run.log
+run.log.old
+daemon.pid
+mode
+sc_tuisoc.orig
+
+# 发布包：作为 Release 附件上传，不进仓库树
+release/*.zip
+
+# 个人发布指引（不属于项目内容）
+发布步骤.md
+
+# 系统垃圾
+Thumbs.db
+desktop.ini
+.DS_Store
+*.tmp
+*.swp
