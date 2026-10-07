@@ -22,10 +22,9 @@ STATE_NODE=""; STATE_STOP=""; STATE_START=""
 BYPASS_ON_ACTIONS=""; BYPASS_OFF_ACTIONS=""; RESTORE_LIST=""; LOCK_NODES=""
 [ -f "$MODDIR/nodes.conf" ] && . "$MODDIR/nodes.conf"
 
-# ---- 同样把自己移出可能被冻结的 cgroup ----
-# 从 WebUI 调用本脚本时（例如点「立即进入旁路」），进程会继承管理器 App 的 cgroup；
-# 如果用户中途切走，动作序列可能被冻结在半路（只写了前两个节点就停了）。
-# 详见 auto_bypass.sh 里的完整说明。
+# ---- 同样把自己移出可能被冻结的 cgroup（理由见 auto_bypass.sh）----
+# 不这么做的话，从 WebUI 调用时进程会继承管理器 App 的 cgroup，
+# 中途切走就可能被冻结在动作序列半路（只写了前两个节点）。
 CGROUP_BEFORE=$(sed -n 's/^0:://p' /proc/$$/cgroup 2>/dev/null)
 if [ "$CGROUP_BEFORE" != "/" ] && [ -w /sys/fs/cgroup/cgroup.procs ]; then
   echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
@@ -34,9 +33,7 @@ fi
 # ---- 免 fork 的读值工具 ----
 # 实测这台机器上每 fork+exec 一个 toybox 小程序约 10~20ms。WebUI 每 3 秒拉一次
 # status，原来一次 status 要起 30 多个进程（约 350ms）；换成 shell 内建后约 10 个。
-# 两个坑（与 auto_bypass.sh 里相同）：
-#   1) read 失败时【不会清空变量】，必须先置空；
-#   2) read 不折叠内部连续空白，所以状态节点要单独归一化。
+# 两个坑同 auto_bypass.sh：read 失败不清空变量（要先置空）；read 不折叠连续空白。
 READ_VAL=""
 CR=$(printf '\r')   # 配置文件可能被人用 Windows 编辑器改过，需要容忍 CRLF
 
@@ -98,14 +95,11 @@ sc_orig_val() {
   [ -n "$READ_VAL" ] || READ_VAL=80
 }
 
-# 写一个节点，并按【读回值】判断成败（与 auto_bypass.sh 里的同名函数同理）。
-# power_supply 类节点（battery/input_suspend 等，即备用方案 C1~C3）写入会返回
-# "Invalid argument"，但值和动作其实已经生效 —— 只看返回值会把成功报成失败。
-# 详见 实测记录.md 第十四节。
+# 写一个节点，按读回值判断成败 —— power_supply 类节点（备用方案 C1~C3）写入会返回
+# "Invalid argument" 但动作已生效，只看返回值会把成功报成失败（同 auto_bypass.sh）。
 write_node() {
   # $1=节点 $2=期望值
-  # 锁定节点在写之前必须先解锁（详见 auto_bypass.sh 里的同名函数：
-  # 440 连 root 都写不进去，必须先 chmod 644）。
+  # 锁定节点写之前必须先解锁：440 连 root 都写不进去（同 auto_bypass.sh）。
   is_lock_node "$1" && chmod 644 "$1" 2>/dev/null
   printf '%s\n' "$2" > "$1" 2>/dev/null
   wr_rc=$?
@@ -137,9 +131,7 @@ is_lock_node() {
   return 1
 }
 
-# 写入成功后按值上锁 / 解锁：写 1 → chmod 440，写 0 → chmod 644。
-# 原因见 auto_bypass.sh 里的同名函数（night_charging 属主是 system，
-# 而 MIUI 充电服务以 system 身份跑，能把它改回去）。
+# 写入成功后按值上锁 / 解锁：写 1 → chmod 440，写 0 → chmod 644（原因见 auto_bypass.sh）。
 apply_lock() {
   is_lock_node "$1" || return 0
   case "$2" in
@@ -242,6 +234,8 @@ case "$1" in
     echo "USB_ONLINE=$usb_on"
     echo "USB_REAL_TYPE=$usb_type"
     echo "CP_IBUS=$cp_ibus"
+# 停充兜底是否正在生效（标记文件由守护进程维护，见 auto_bypass.sh 的 stopcharge_on）
+[ -f "$STATE_DIR/stopcharge" ] && echo "STOPCHARGE=1" || echo "STOPCHARGE=0"
     echo "STATE_VALUE=$v"
     echo "ENABLE_THRESHOLD=$thr_on"
     echo "DISABLE_THRESHOLD=$thr_off"
@@ -289,7 +283,7 @@ case "$1" in
     ;;
   mode)
     # 切换运行模式（v12.1）：mode auto | mode on
-    #   auto = 按阈值自动（默认）    on = 手动强制旁路，无视阈值
+    # auto = 按阈值自动（默认） on = 手动强制旁路，无视阈值
     # 写完模式文件后给守护进程发 USR1，让它立刻醒来重新判定，不用等满一轮。
     want="$2"
     case "$want" in

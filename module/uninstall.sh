@@ -31,7 +31,7 @@ kill_by_cmdline -KILL
 # ---- 先解锁，再还原（顺序绝对不能反）----
 # night_charging 可能被 chmod 440 锁着，而 440 连 root 都写不进去
 # （ksu 的 root 有 CAP_FOWNER 能 chmod，但没有 CAP_DAC_OVERRIDE）——
-# 那时 `echo 0 > 节点` 会 **静默失败**（2>/dev/null 把 Permission denied 吃掉），
+# 那时 `echo 0 > 节点` 会 静默失败（2>/dev/null 把 Permission denied 吃掉），
 # 节点留在 1，卸载后 MIUI 的充电就被永久卡在 80%。这就是 v11.16 之前 uninstall.sh 的 bug。
 [ -n "$LOCK_NODES" ] || LOCK_NODES="/sys/class/power_supply/battery/night_charging"
 for n in $LOCK_NODES; do
@@ -62,7 +62,7 @@ done
 ulog "完成，锁节点权限已还原 644"
 
 # 说明：当前策略写 current_cmd + night_charging + en_power_path 三个节点。
-# night_charging 是 v11.14 起才开始写的，**必须在 RESTORE_LIST 里还原成 0**，
+# night_charging 是 v11.14 起才开始写的，必须在 RESTORE_LIST 里还原成 0，
 # 否则卸载后框架会把充电永久卡在 80%（en_power_path 由驱动自管，不用管）。
 # 不碰 enable_sc / sc_tuisoc，所以不需要还原 sc_tuisoc（早期版本做过，见实测记录第十一节）。
 # RESTORE_LIST 里后面几项是给「用户手动试过二类备用节点」留的兜底。

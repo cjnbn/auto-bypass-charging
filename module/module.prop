@@ -1,6 +1,6 @@
 id=bypass_charger
 name=自动旁路供电
-version=v12.4
-versionCode=204
+version=v12.9
+versionCode=209
 author=酷安@柳下惠77 (GitHub: cjnbn)
 description=配置文件 config.sh 和日志 run.log 在 /data/adb/bypass_charger

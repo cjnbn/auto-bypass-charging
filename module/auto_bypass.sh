@@ -2,28 +2,19 @@
 ###############################################################################
 # 自动旁路供电 (module id: bypass_charger)
 #
-# 目标：让手机由充电器直接供电，电池既不充也不放（电池闲置 / 真旁路）。
+# 目标：插着充电器时由适配器直接给系统供电，电池既不充也不放（真旁路）。
 #
-# 控制策略（详见 nodes.conf 顶部）—— 三条一起写，覆盖全部场景：
-#   1) current_cmd="0 1"     泵闲着时（<80% 的 5V 直充、≥89% 泵停了）由它干活
-#   2) night_charging="1"    ★ 压在充电泵：≥80% 时 MIUI 框架立刻停充，泵没负载自己就停
-#   3) en_power_path="1"     使能主电源路径，把「停充」升级成「真旁路」（ibat=0）
-# 退出时【先】把 night_charging 写回 0（否则框架会把充电永久卡在 80%），再 current_cmd="0 0"。
+# 控制策略（唯一来源 nodes.conf）—— 三条一起写，覆盖全部场景：
+#   current_cmd="0 1"     泵闲着时由它干活（<80% 的 5V 直充、泵停了以后）
+#   night_charging="1"    压在充电泵：≥80% 时 MIUI 框架立刻停充，泵没负载自己就停
+#   en_power_path="1"     使能主电源路径，把「停充」升级成「真旁路」（ibat=0）
+# 退出时先写 night_charging=0（否则框架会把充电卡在 80%），再写 current_cmd="0 0"。
 #
-# 曾经用过「enable_sc + sc_tuisoc」的两段式，实测证明是多余的（见 nodes.conf 与实测记录）。
+# 状态机：插着充电器且电量 ≥ ENABLE_THRESHOLD 进旁路，≤ DISABLE_THRESHOLD 退出，
+# 拔掉充电器立刻退出（nap_watch 每 5 秒盯一次）；没有充电器时不进旁路 ——
+# 否则 night_charging 会挂在那里，重新插上后框架把充电压在 80%，阈值就失效了。
 #
-# 已知限制：能直接关泵的三个节点（cp_master/online、cp_slave/online、
-# pd_cp_manager/request_ibus）都是 Permission denied —— 但现在用 night_charging 绕过去了。
-#
-# 状态机（v11.16 起）：
-#   充电器在线 且 电量 >= ENABLE_THRESHOLD   -> 进入旁路
-#   充电器在线 且 电量 <= DISABLE_THRESHOLD  -> 退出旁路
-#   充电器被拔掉                             -> 立刻退出旁路（nap_watch 每 5 秒盯一次）
-#   没有充电器时【不会】进入旁路 —— 否则 night_charging 会挂在那里，
-#   重新插上后框架把充电压在 80%，用户设的阈值（比如 90）就失效了。
-#
-# 配置: /data/adb/bypass_charger/config.sh
-# 日志: /data/adb/bypass_charger/run.log
+# 配置 /data/adb/bypass_charger/config.sh，日志同目录 run.log
 ###############################################################################
 
 MODDIR=${0%/*}
@@ -37,6 +28,8 @@ PID_FILE="$STATE_DIR/daemon.pid"
 # 运行模式（v12.1 新增）：auto = 按阈值自动；on = 手动强制进入旁路（无视阈值）
 # 内容就是 "auto" 或 "on" 两个词；文件不存在/读不懂一律按 auto 处理。
 MODE_FILE="$STATE_DIR/mode"
+# 停充兜底标记（存在 = 当前正压住输入让电池不充，见 stopcharge_on）
+STOPCH_FLAG="$STATE_DIR/stopcharge"
 # 本策略不再写 sc_tuisoc，所以也不会去创建这个文件；只是读一次（早期版本留下的），
 # 供 nodes.conf 末尾那些用 @SC_ORIG 的备用方案引用，读不到按本机原值 80 兜底。
 ORIG_TUISOC_FILE="$STATE_DIR/sc_tuisoc.orig"
@@ -48,12 +41,16 @@ CP_IBUS_FILE="/sys/class/power_supply/cp_master/cp_ibus"
 USB_TYPE_FILE="/sys/class/power_supply/usb/real_type"
 
 # 控制策略（唯一来源 nodes.conf）
+# 约定：凡是在 nodes.conf 里配置的变量，只能在这里**先清空**（第 45 行 source 之前），
+# 绝不能在 source 之后无条件写默认值 —— 那会把配置里的值覆盖掉。
+# 血的教训：v12.5/v12.6 的 PUMP_KILL_NODE（就是现在的 STOPCH_NODE）被清空过，导致第 ④ 条一直不触发（见 实测记录.md 28.5）。
 STATE_NODE=""; STATE_STOP=""; STATE_START=""
 BYPASS_ON_ACTIONS=""; BYPASS_OFF_ACTIONS=""; RESTORE_LIST=""; LOCK_NODES=""
 POWER_PATH_CHECK=""
+STOPCH_NODE=""; STOPCH_IBUS_THRESHOLD=""; STOPCH_MIN_CAP=""
 [ -f "$MODDIR/nodes.conf" ] && . "$MODDIR/nodes.conf"
 
-# 默认参数
+# 默认参数（nodes.conf 没配时的兜底；用 ${X:-默认} 写，配了就以配置为准）
 ENABLE_THRESHOLD=95
 DISABLE_THRESHOLD=80
 CHECK_INTERVAL=60
@@ -65,12 +62,16 @@ INEFFECTIVE_IBAT=150000
 # 明显为正说明系统在靠电池跑（详见 stopped_not_bypassed）。
 # 不设成 0 是因为收敛期（约 10 秒）和弱适配器下都会有短暂的小正值。
 STOPPED_IBAT=30000
+# 停充兜底（保活第 ④ 条，参数在 nodes.conf 里配）
+# 注意用 ${X:-默认}：STOPCH_NODE 留空是"关闭这条"的合法配置，所以它不加默认值。
+STOPCH_IBUS_THRESHOLD=${STOPCH_IBUS_THRESHOLD:-300}
+STOPCH_MIN_CAP=${STOPCH_MIN_CAP:-15}
 # 两次重打之间的最小间隔（秒）
 REAPPLY_COOLDOWN=90
 
 # 日志只保留最近 LOG_KEEP_LINES 条（v12.3 起）。
 # 原来按 64KB 轮转成 run.log.old；改成"截尾"更适合看：正式版（DEBUG=0）日志本来就少，
-# 30 条足够覆盖最近的状态机决策（模式切换/进旁路/自愈/拔插/报错），
+# 30 条足够覆盖最近的状态机决策（模式切换/进旁路/保活/拔插/报错），
 # 而文件永远很小、WebUI 里一眼能看完，不用滚动。
 # 代价：写满之后每写一条会多做一次 tail+mv（两个 fork，约 20~40ms）。
 # 正式版一天也就几条，可忽略；DEBUG=1 时是每轮一条，同样可忽略。
@@ -104,15 +105,15 @@ read_digits() {
 
 # ---- 免 fork 的读值工具 ----
 # 实测这台机器上每 fork+exec 一个 toybox 小程序约 10~20ms：
-#     $(cat f | tr -cd '0-9')                约 32ms
-#     $(cat f | tr -s ' \t' ' ' | sed ...)   约 47ms
-#     read -r v < f  （shell 内建）           约  0ms
+# $(cat f | tr -cd '0-9') 约 32ms
+# $(cat f | tr -s ' \t' ' ' | sed ...) 约 47ms
+# read -r v < f （shell 内建） 约 0ms
 # 守护进程每轮要读好几处，这里把热路径全换成内建。
 # 两个必须注意的坑（都实测过）：
-#   1) read 失败时【不会清空变量】。必须先把变量置空，否则会拿上一次的旧值
-#      去做阈值比较。文件不存在时 v 保持原值、read 返回 1。
-#   2) read 不折叠内部的连续空白。"0  1" 读出来仍是 "0  1"，
-#      不能直接和 STATE_STOP="0 1" 比较 —— 这种情况极罕见，回退老写法兜底。
+# 1) read 失败时不会清空变量。必须先把变量置空，否则会拿上一次的旧值
+# 去做阈值比较。文件不存在时 v 保持原值、read 返回 1。
+# 2) read 不折叠内部的连续空白。"0 1" 读出来仍是 "0 1"，
+# 不能直接和 STATE_STOP="0 1" 比较 —— 这种情况极罕见，回退老写法兜底。
 READ_VAL=""
 read_val() {
   READ_VAL=""
@@ -166,15 +167,15 @@ load_config() {
   done < "$CONF_FILE"
 }
 
-# 写一个节点，并按【读回值】判断成败。
+# 写一个节点，并按读回值判断成败。
 # 为什么不能只看 write 的返回值：battery/input_suspend、usb/input_suspend、
-# battery/night_charging 这些 power_supply 节点的 store 函数会【先改状态、再返回
-# -EINVAL】—— write 报 "Invalid argument"，但值和动作其实都已经生效了。
+# battery/night_charging 这些 power_supply 节点的 store 函数会先改状态、再返回
+# -EINVAL —— write 报 "Invalid argument"，但值和动作其实都已经生效了。
 # 实测：写 1 报错，读回是 1，停充也确实发生了（见 实测记录.md 第十四节）。
 # 只看返回值会把这些成功的动作记成 ACTION FAILED，并让 run_actions 返回非 0。
 write_node() {
   # $1=节点 $2=期望值
-  # 锁定节点在写之前【必须先解锁】：chmod 440 会连我们自己也挡在外面。
+  # 锁定节点在写之前必须先解锁：chmod 440 会把模块自己也挡在外面。
   # 实测：ksu 的 root 有 CAP_FOWNER（能 chmod），但没有 CAP_DAC_OVERRIDE ——
   # 往一个 440 的文件里写会直接 `Permission denied`。
   # 酷安帖子里"关的时候先 chmod 660 再写 0"就是这个原因，别把顺序搞反。
@@ -215,7 +216,7 @@ is_lock_node() {
 
 # 写入成功后按值上锁 / 解锁。
 # 为什么要上锁：night_charging 属主是 system:system、权限 644，而 MIUI 的充电服务
-# 就是以 system 身份跑的 —— 它能把我们写的 1 改回 0（实测 22:20 写、22:36 已变 0）。
+# 就是以 system 身份跑的，它能把模块写进去的 1 改回 0（实测 22:20 写、22:36 已变 0）。
 # chmod 440 去掉 owner 写位后 system 就写不动了（没有 CAP_DAC_OVERRIDE），root 仍能写。
 # 写 1 → 440（上锁）；写 0 → 644（还原，不能把 MIUI 的夜间充电永久挡在外面）。
 apply_lock() {
@@ -241,10 +242,10 @@ lock_released() {
 
 # v12.2：旁路"打了一半"——电池还在供电，说明只做到了停充、没做到真旁路。
 # 判据（三条缺一不可，避免误判）：
-#   ① 状态是旁路、充电器在线
-#   ② 电池电流明显为正（> +30mA = 电池在给系统供电）
-#   ③ POWER_PATH_CHECK（en_power_path）读回不是 1 → 主电源路径没使能
-# 为什么要 ③：供电不足的适配器（如电脑 USB 口）下，即使旁路正常、电池也会补差额，
+# 1) 状态是旁路、充电器在线
+# 2) 电池电流明显为正（> +30mA = 电池在给系统供电）
+# 3) POWER_PATH_CHECK（en_power_path）读回不是 1 → 主电源路径没使能
+# 为什么要 3) ：供电不足的适配器（如电脑 USB 口）下，即使旁路正常、电池也会补差额，
 # 那种情况 en_power_path 是 1，不该重打。读到的值放在 PP_LAST 供日志用。
 PP_LAST=""
 stopped_not_bypassed() {
@@ -323,6 +324,51 @@ bypass_ineffective() {
   return 0
 }
 
+# 充电泵在转吗？（cp_ibus ≥ STOPCH_IBUS_THRESHOLD）
+# 泵在转 = current_cmd 已经被它绕过去了，只剩两条路：压住输入（停充）或等电量 ≥80%。
+pump_running() {
+  [ -n "$STOPCH_NODE" ] || return 1
+  [ -n "$CP_IBUS_FILE" ] || return 1
+  case "$STOPCH_IBUS_THRESHOLD" in ''|*[!0-9]*) return 1 ;; esac
+  read_val "$CP_IBUS_FILE" || return 1
+  case "$READ_VAL" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$READ_VAL" -ge "$STOPCH_IBUS_THRESHOLD" ] && return 0
+  return 1
+}
+
+# 充电器是不是真的还插着？
+# 停充兜底会把 usb/online 变成 0（那是我们自己压的），此时不能当成"拔线"，
+# 用 usb/real_type 判断：真拔掉时它是 Unknown，压住输入时仍是 USB_PD 之类。
+usb_really_present() {
+  read_val "$USB_TYPE_FILE" || return 1
+  [ -n "$READ_VAL" ] && [ "$READ_VAL" != "Unknown" ]
+}
+
+# 保活第 ④ 条：停充兜底 —— 泵在转、而旁路压不住时，压住 input_suspend=1 不放。
+# 为什么是"压住"而不是"打一发脉冲"：1→0 这个跳变本身就是"重新协商 PD、把泵叫回来"的触发器，
+# 实测脉冲只能把泵按下约 1 分钟（cp 1381→695），随后自己回到满速（见 实测记录.md 28.6）。
+# 压住不放则泵持续停摆（1376→3、598→1），代价是输入被切、手机转电池供电 —— 这是"停充"，不是真旁路。
+# 安全阀：电量掉到 STOPCH_MIN_CAP 立即放弃（别把电池放空），并且本次运行不再重试。
+stopcharge_on() {
+  [ -n "$STOPCH_NODE" ] || return 1
+  [ -e "$STOPCH_NODE" ] || return 1
+  [ "$stopch" = "1" ] && return 0
+  printf '1\n' > "$STOPCH_NODE" 2>/dev/null
+  stopch=1
+  : > "$STOPCH_FLAG" 2>/dev/null
+  log "旁路压不住泵（cp_ibus=$READ_VAL），改为停充兜底：压住 input_suspend=1（手机转电池供电）"
+  return 0
+}
+
+stopcharge_off() {
+  [ "$stopch" = "1" ] || return 0
+  printf '0\n' > "$STOPCH_NODE" 2>/dev/null
+  stopch=0
+  rm -f "$STOPCH_FLAG" 2>/dev/null
+  log "退出停充兜底，恢复输入（input_suspend=0）"
+  return 0
+}
+
 # ---- 先确保状态目录存在（必须在写 PID 文件之前）----
 mkdir -p "$STATE_DIR" 2>/dev/null
 chmod 700 "$STATE_DIR" 2>/dev/null
@@ -375,10 +421,10 @@ trap 'cleanup; exit 0' INT TERM HUP
 
 # v12.1：WebUI 切换模式后发 USR1，让守护进程立刻醒来重新判定，不用等满一轮。
 # 注意两点：
-#   1) 信号只会打断当前的 `wait`，而 nap_watch 是"5 秒一格"的循环 —— 光靠打断
-#      只会少睡一格、然后接着睡下一格。所以这里额外置 WAKE=1，
-#      由 nap_watch 检查它并立刻返回（主循环每轮开头会把 WAKE 清零）。
-#   2) 顺便把当前那个 sleep 杀掉，免得每次打断都留一个孤儿 sleep 进程。
+# 1) 信号只会打断当前的 `wait`，而 nap_watch 是"5 秒一格"的循环 —— 光靠打断
+# 只会少睡一格、然后接着睡下一格。所以这里额外置 WAKE=1，
+# 由 nap_watch 检查它并立刻返回（主循环每轮开头会把 WAKE 清零）。
+# 2) 顺便把当前那个 sleep 杀掉，免得每次打断都留一个孤儿 sleep 进程。
 WAKE=0
 trap 'WAKE=1; [ -n "$SLEEP_PID" ] && kill "$SLEEP_PID" 2>/dev/null; SLEEP_PID=""' USR1
 
@@ -450,6 +496,8 @@ do_bypass_off() {
     fi
     return 1
   fi
+  stopcharge_off
+  stopch_gaveup=0
   current_state="off"; last_err=""
   if [ -n "$1" ]; then log "bypass OFF (capacity=$cap / $1)"; else log "bypass OFF (capacity=$cap)"; fi
   return 0
@@ -492,6 +540,14 @@ last_err=""
 tick_no=0
 last_apply_tick=0
 COOLDOWN_TICKS=$((REAPPLY_COOLDOWN / CHECK_INTERVAL + 1))
+# 停充兜底的状态（运行时变量 + 标记文件；stopch_gaveup 表示本次运行已因安全阀放弃）
+stopch=0
+stopch_gaveup=0
+# 上次运行可能留下 input_suspend=1，启动时先恢复成 0，别让手机"莫名其妙不充电"
+if [ -n "$STOPCH_NODE" ] && [ -e "$STOPCH_NODE" ]; then
+  case "$(cat "$STOPCH_NODE" 2>/dev/null)" in 1) printf '0\n' > "$STOPCH_NODE" 2>/dev/null ;; esac
+fi
+rm -f "$STOPCH_FLAG" 2>/dev/null
 
 while :; do
   tick_no=$((tick_no + 1))
@@ -534,20 +590,27 @@ while :; do
   # 用户设的阈值（比如 90）在这条路径上就失效了。
   # 只在明确读到 "0" 时才动作；读不到（空值）不动，避免节点异常时误退出。
   if [ "$current_state" = "on" ] && [ "$usb_on_v" = "0" ]; then
-    do_bypass_off "充电器已拔"
-    nap "$CHECK_INTERVAL"
-    continue
+    # 停充兜底会把 online 变成 0，那是我们自己压的；只有 real_type 也认不出充电器才算真拔线
+    if [ "$stopch" = "1" ] && usb_really_present; then
+      :
+    else
+      do_bypass_off "充电器已拔"
+      nap "$CHECK_INTERVAL"
+      continue
+    fi
   fi
 
-  # 自愈：已经在旁路状态，但
-  #   ① 电池还在被充 -> 插拔过充电器，PD 重新快充了
-  #   ② 锁定节点（night_charging）被外力改回 0 -> 压泵能力没了，必须补回来
-  #   ③ 只做到"停充"：电池在供电、而 en_power_path 没使能（v12.2）
+  # 保活：已经在旁路状态，但
+  # 1) 电池还在被充 -> 插拔过充电器，PD 重新快充了
+  # 2) 锁定节点（night_charging）被外力改回 0 -> 压泵能力没了，必须补回来
+  # 3) 只做到"停充"：电池在供电、而 en_power_path 没使能（v12.2）
+  # 4) 泵在全速跑（cp_ibus 大）-> 上面三条都压不住它，得先打脉冲（v12.5）
   # last_apply_tick=0 表示「本次启动后还没重打过」，此时不受冷却限制
   # （原来用墙上时间时 now-0 必然远大于冷却值，效果就是首轮立即重打）。
   why=""
-  bypass_ineffective "$ibat" && why="电池仍在充 ibat=$ibat"
-  if [ -z "$why" ] && stopped_not_bypassed "$ibat"; then
+  still_charging=0
+  if bypass_ineffective "$ibat"; then why="电池仍在充 ibat=$ibat"; still_charging=1; fi
+  if [ "$stopch" != "1" ] && [ -z "$why" ] && stopped_not_bypassed "$ibat"; then
     why="只做到停充（电池在供电 ibat=$ibat、en_power_path=${PP_LAST:-?}）"
   fi
   if lock_released; then
@@ -556,6 +619,17 @@ while :; do
   fi
   if [ -n "$why" ] && { [ "$last_apply_tick" = "0" ] || [ $((tick_no - last_apply_tick)) -ge "$COOLDOWN_TICKS" ]; }; then
     log "bypass 失效（$why），重打进入序列"
+    # 第 ④ 条：如果失效原因是"电池还在充"、而且泵在全速跑，光重打是没用的
+    # （current_cmd 绕不过泵、night_charging 要 ≥80% 才被理会）—— 改为停充兜底压住输入。
+    if [ "$stopch_gaveup" != "1" ] && [ "$still_charging" = "1" ] && pump_running; then
+      if [ "$cap" -le "$STOPCH_MIN_CAP" ] 2>/dev/null; then
+        stopcharge_off
+        stopch_gaveup=1
+        log "电量已到安全下限（${cap}% ≤ ${STOPCH_MIN_CAP}%），放弃停充、恢复充电"
+      else
+        stopcharge_on
+      fi
+    fi
     do_bypass_on
     nap_watch "$CHECK_INTERVAL"
     continue
@@ -563,9 +637,9 @@ while :; do
 
   # ---- ⑥⑦ 进入 / 退出判定 ----
   # 两种模式的规则不同（v12.1）：
-  #   auto（自动）  ：插着充电器 且 电量>=ENABLE_THRESHOLD -> 进；电量<=DISABLE_THRESHOLD -> 出
-  #   on（手动旁路）：无视阈值，只要插着充电器就保持旁路；退出只由「拔充电器」或「切回自动」触发
-  # 两种模式都保留：拔充电器退出（上面 ④）、自愈重打（上面 ⑤）、以及"没充电器不进旁路"。
+  # auto（自动） ：插着充电器 且 电量>=ENABLE_THRESHOLD -> 进；电量<=DISABLE_THRESHOLD -> 出
+  # on（手动旁路）：无视阈值，只要插着充电器就保持旁路；退出只由「拔充电器」或「切回自动」触发
+  # 两种模式都保留：拔充电器退出（上面 4) ）、保活重打（上面 5) ）、以及"没充电器不进旁路"。
   if [ "$MODE" = "on" ]; then
     if [ "$usb_on_v" != "0" ] && [ "$current_state" != "on" ]; then
       do_bypass_on "手动模式"
